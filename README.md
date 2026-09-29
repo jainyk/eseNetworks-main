@@ -28,7 +28,7 @@ Keep the container engine set to containerd; Kubernetes can remain enabled or di
 | eStargz | An image-layer format compatible with OCI registries that adds a table of contents and independently addressable compressed regions/chunks. This lets a runtime fetch needed file data without downloading and unpacking the entire layer first. |
 | Stargz Snapshotter (`containerd-stargz-grpc`) | A containerd proxy snapshotter. It serves the `stargz` snapshotter API over a Unix socket and presents eStargz layers as remote/lazy filesystem snapshots. It fetches metadata and file chunks from the registry as they are needed. |
 | FUSE | Linux's Filesystem in Userspace interface. Stargz Snapshotter uses a FUSE mount to expose the remote image filesystem to the container. A workload's normal `open`/`read` is serviced by the mounted filesystem; missing file data can cause Stargz to fetch the required eStargz chunk(s), then make the data available to that read. FUSE is the kernel/userspace filesystem bridge; it is not the image format, registry, or snapshotter itself. |
-| Local Docker Registry (`registry:2`) | Holds the two trial image references at `localhost:5000`, so both benchmark modes use a registry pull path rather than simply starting from the build-local name. It remains running and retains pushed test manifests/layers after a run. |
+| Local Docker Registry | Holds the two trial image references at `localhost:5000`, so both benchmark modes use a registry pull path rather than simply starting from the build-local name. It remains running and retains pushed test manifests/layers after a run. |
 | `nerdctl` | Containerd-compatible CLI used by the backend to build, tag, convert, push, run, and clean up the PoC's containers/images. |
 
 ## Run
