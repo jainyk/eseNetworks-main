@@ -15,6 +15,22 @@ The sample image contains a 256 MiB deterministic payload in a separate image la
 
 Keep the container engine set to containerd; Kubernetes can remain enabled or disabled. To install Stargz, copy `poc/rancher/stargz.start` to `%LOCALAPPDATA%\\rancher-desktop\\provisioning\\stargz-snapshotter.start`, then restart Rancher Desktop. This provisioning hook preserves and extends Rancher's generated containerd configuration. The installed runtime should report both `overlayfs` and `stargz` in `nerdctl info`.
 
+## Components and what each one does
+
+| Component | Role in this PoC |
+| --- | --- |
+| Windows Python backend (`poc/server.py`) | Exposes a small HTTP API, orchestrates `nerdctl`, times readiness and file-read requests, and saves JSON benchmark records. It uses only Python's standard library. |
+| Workload (`poc/workload/server.py`) | A small HTTP server inside the test image. `/healthz` signals readiness. `/read?bytes=N` opens and reads the payload file only when requested. |
+| Workload Dockerfile | Builds the Python service image and writes a deterministic, trial-specific large payload into its own image layer. |
+| Rancher Desktop | Supplies the local Linux VM/WSL environment and containerd daemon. The PoC targets Rancher's **containerd** engine through its `nerdctl` CLI. |
+| containerd | Pulls/resolves the image, asks a snapshotter to prepare the container root filesystem, and runs the container. |
+| `overlayfs` snapshotter | The baseline snapshotter. It creates the container's writable filesystem view from locally available image layers using Linux OverlayFS. The normal image pull makes layer contents available before the workload can use them. |
+| eStargz | An image-layer format compatible with OCI registries that adds a table of contents and independently addressable compressed regions/chunks. This lets a runtime fetch needed file data without downloading and unpacking the entire layer first. |
+| Stargz Snapshotter (`containerd-stargz-grpc`) | A containerd proxy snapshotter. It serves the `stargz` snapshotter API over a Unix socket and presents eStargz layers as remote/lazy filesystem snapshots. It fetches metadata and file chunks from the registry as they are needed. |
+| FUSE | Linux's Filesystem in Userspace interface. Stargz Snapshotter uses a FUSE mount to expose the remote image filesystem to the container. A workload's normal `open`/`read` is serviced by the mounted filesystem; missing file data can cause Stargz to fetch the required eStargz chunk(s), then make the data available to that read. FUSE is the kernel/userspace filesystem bridge; it is not the image format, registry, or snapshotter itself. |
+| Local Docker Registry (`registry:2`) | Holds the two trial image references at `localhost:5000`, so both benchmark modes use a registry pull path rather than simply starting from the build-local name. It remains running and retains pushed test manifests/layers after a run. |
+| `nerdctl` | Containerd-compatible CLI used by the backend to build, tag, convert, push, run, and clean up the PoC's containers/images. |
+
 ## Run
 
 From the repository root in Command Prompt or PowerShell:
@@ -43,8 +59,7 @@ Set `NERDCTL_BIN` if `nerdctl` is not on `PATH`. Set `POC_PAYLOAD_MIB` to change
 
 ## What is measured
 
-Each trial builds one payload image and an eStargz-converted variant, publishes them to a local registry, then measures container start to `/healthz`, the first `/read`, and an immediate repeated `/read`. 
-
+Each trial builds one payload image and an eStargz-converted variant, publishes them to a local registry, then measures container start to `/healthz`.
 
 ## Recorded benchmark result
 
@@ -64,8 +79,6 @@ Both modes succeeded. In this run, lazy mode reached readiness about 0.87 second
 - `POST /benchmarks`: start one or more baseline/lazy trials. JSON fields: `modes` (array containing `baseline` and/or `lazy`), `trials` (1-10), and optional `payload_mib` (16-1024).
 - `GET /benchmarks`: list persisted benchmark records.
 - `GET /benchmarks/{id}`: fetch one record.
-
-Benchmark records are written to `poc/data/benchmarks.json`.
 
 ## Scope
 
