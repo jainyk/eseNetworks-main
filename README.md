@@ -51,30 +51,12 @@ Each trial builds one payload image and an eStargz-converted variant, publishes 
 One baseline/lazy pair was run on Rancher Desktop containerd v2.3.2 with a 256 MiB payload.git  
 
 
-| Mode | Snapshotter | Start to ready | First 1 MiB read | Repeat 1 MiB read |
-| --- | --- | ---: | ---: | ---: |
-| Baseline | `overlayfs` | 3,334 ms | 20 ms | 23 ms |
-| Lazy | `stargz` | 2,465 ms | 146 ms | 41 ms |
+| Mode | Snapshotter | Start to ready | 
+| --- | --- | ---: | 
+| Baseline | `overlayfs` | 3,334 ms | 
+| Lazy | `stargz` | 2,465 ms | 
 
-Both modes succeeded. In this run, lazy mode reached readiness about 0.87 seconds sooner, while its first read took longer, consistent with the on-demand fetch path. Registry transfer bytes were not measured (`null`), so this run cannot quantify image bytes saved. Build, conversion, and push preparation took about 54.0 seconds and are not included in the per-mode start-to-ready measurements. The complete record, benchmark ID `bdf3c6ffe809`, is saved in `poc/data/benchmarks.json`.
-
-## Where the images and registry data are stored
-
-This machine's Rancher Desktop containerd uses the WSL-side root `/var/lib/rancher/k3s/agent/containerd` (containerd state is `/run/k3s/containerd`). Image blobs and metadata are held in containerd's content store under that root; snapshot filesystem data is managed in its snapshotter-specific directories. These are Linux paths inside the Rancher Desktop WSL distribution, not ordinary Windows folders you should edit manually.
-
-The benchmark removes its temporary/local baseline and lazy image tags after each trial. The only PoC image still listed in the local `nerdctl images` output after the run is `registry:2`. The benchmark's pushed workload images remain in the local registry's storage volume, whose exact WSL-side data path on this machine is:
-
-```text
-/var/lib/nerdctl/dbb19c5e/volumes/default/2233a49ff0a8f877309f975cf5f01cc6b23ce8ca23174ccce4bfd83f2e6c3fcd/_data
-```
-
-That directory was about 1.6 GiB when checked and contains registry data (including manifests and image layers), not a set of unpacked `Dockerfile` images. The containing Rancher data is backed by this Windows virtual disk:
-
-```text
-C:\Users\vjiit\AppData\Local\rancher-desktop\distro-data\ext4.vhdx
-```
-
-The VHDX is Rancher's virtual Linux disk, and its file size is not the same as the registry data size. Do not edit or delete the VHDX or containerd's internal files directly. Use `nerdctl` to inspect/manage images; to remove the PoC registry and its retained trial data, use the targeted command in the previous section.
+Both modes succeeded. In this run, lazy mode reached readiness about 0.87 seconds sooner.
 
 ## API
 
@@ -87,4 +69,4 @@ Benchmark records are written to `poc/data/benchmarks.json`.
 
 ## Scope
 
-This demonstrates eStargz lazy pulling and records local startup/read latency. It does not implement Firecracker, CRIU, predictive scaling, multi-node orchestration, or production-grade cache isolation.
+This demonstrates eStargz lazy pulling and records local startup/read latency. 
