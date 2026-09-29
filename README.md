@@ -75,7 +75,7 @@ One baseline/lazy pair was run on Rancher Desktop containerd v2.3.2 with a 256 M
 ## API
 
 - `GET /healthz`: backend and nerdctl availability.
-- `POST /benchmarks`: start one or more baseline/lazy trials. JSON fields: `modes` (array containing `baseline` and/or `lazy`), `trials` (1-10), and optional `payload_mib` (16-1024).
+- `POST /benchmarks`: start one or more baseline/lazy trials. JSON fields: `modes` (array containing `baseline` and/or `lazy`).
 - `GET /benchmarks`: list persisted benchmark records.
 - `GET /benchmarks/{id}`: fetch one record.
 
