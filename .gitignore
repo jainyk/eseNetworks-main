@@ -1,9 +1,0 @@
-__pycache__/
-*/benchmarks.json
-*/ActualReadme.md
-.idea/*
-*/code-flow.md
-*/.gitignore
-*/.gitattributes
-.idea/esenetworks-main.iml
-*/poc/data/
