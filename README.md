@@ -63,15 +63,14 @@ Each trial builds one payload image and an eStargz-converted variant, publishes 
 
 ## Recorded benchmark result
 
-One baseline/lazy pair was run on Rancher Desktop containerd v2.3.2 with a 256 MiB payload.git  
+One baseline/lazy pair was run on Rancher Desktop containerd v2.3.2 with a 256 MiB payload. 
 
 
 | Mode | Snapshotter | Start to ready | 
-| --- | --- | ---: | 
-| Baseline | `overlayfs` | 3,334 ms | 
-| Lazy | `stargz` | 2,465 ms | 
+| --- | --- |---------------:| 
+| Baseline | `overlayfs` |       3,334 ms | 
+| Lazy | `stargz` |       1,665 ms | 
 
-Both modes succeeded. In this run, lazy mode reached readiness about 0.87 seconds sooner.
 
 ## API
 
