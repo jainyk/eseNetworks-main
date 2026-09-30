@@ -82,3 +82,43 @@ One baseline/lazy pair was run on Rancher Desktop containerd v2.3.2 with a 256 M
 ## Scope
 
 This demonstrates eStargz lazy pulling and records local startup/read latency. 
+
+## Python FUSE demonstrator
+
+A separate read-only Python FUSE experiment serves a virtual payload file through HTTP range requests and reports source bytes fetched. It compares a payload-in-image baseline with a small FUSE client image; the source container is started before client timing. 
+
+## Approach
+
+The demo makes a large payload available as a single read-only virtual file, `/mnt/lazy/payload.bin`:
+
+1. The origin container serves a generated payload through HTTP `HEAD` and `GET` with a single byte `Range` request. It counts range requests and payload bytes returned.
+2. The FUSE process asks the origin for the file length, so it can report file metadata without downloading the file contents.
+3. When the application opens and reads the virtual file, the kernel sends FUSE read operations to the Python daemon. The daemon maps each offset to fixed-size chunks and fetches only the missing chunks from the origin.
+4. The daemon keeps a bounded least-recently-used in-memory chunk cache. For this demonstration, direct I/O bypasses the kernel page cache so the repeat request exercises the Python cache and should need no additional origin bytes.
+5. The application exposes `/healthz` only after the FUSE mount is usable, plus `/read?bytes=N&offset=O` to exercise normal file access.
+
+FUSE is the Linux kernel/userspace bridge for filesystem operations; the Python daemon supplies the file metadata and data. The cache chunk size is 1 MiB and its limit is 16 MiB by default. Both can be changed at runtime by the benchmark CLI. The demo opens the FUSE file with direct I/O so the kernel page cache does not hide repeated reads from the Python LRU cache; this makes the PoC's cache behavior visible, but is a measurement choice rather than a production tuning recommendation.
+
+
+## Modules
+
+| File | Responsibility |
+| --- | --- |
+| `poc/filesystem/Dockerfile` | Defines three build targets from shared generated data: `origin` (large payload plus range server), `baseline` (workload with payload in the image), and `fuse` (workload plus Python FUSE code, without the payload). |
+| `poc/filesystem/origin.py` | Serves `HEAD /payload.bin`, exact `GET /payload.bin` byte ranges, `/healthz`, `/stats`, and `POST /stats/reset`. Rejects invalid/out-of-bounds ranges with HTTP 416. |
+| `poc/filesystem/fusefs.py` | Implements the read-only FUSE root and `/payload.bin` callbacks. Validates range status, `Content-Range`, and response size before caching bytes. |
+| `poc/filesystem/workload.py` | In `baseline` mode serves `/app/payload.bin`; in `fuse` mode mounts the virtual file first, then serves from `/mnt/lazy/payload.bin`. Provides health and range-of-file reads. |
+| `poc/filesystem/benchmark.py` | Builds and pushes trial images, starts the origin before timing, runs baseline and FUSE clients, verifies content/edge reads, records source range byte counts, and writes JSON results. |
+| `poc/filesystem/requirements.txt` | Pins `fusepy` for repeatable FUSE client image builds. |
+| `poc/data/filesystem-benchmarks.json` | Stores the standalone FUSE benchmark records (created on first run). |
+
+
+### Verified Rancher run
+
+One 256 MiB trial completed on Rancher Desktop containerd. Origin startup was excluded as described above.
+
+| Client | Start to ready | 
+| --- |---------------:| 
+| Baseline |       1,764 ms | 
+| Python FUSE |       1,238 ms | 
+
