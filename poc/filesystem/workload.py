@@ -122,6 +122,7 @@ def main() -> None:
         print(f"FUSE mount ready at {MOUNTPOINT}", flush=True)
 
     server = WorkloadServer((args.host, args.port), make_handler(payload))
+#binds _stop_server to these signals, the application executes a graceful cleanup sequence whenever SIGINT or SIGTERM is received:
     signal.signal(signal.SIGTERM, lambda *_signal: _stop_server(server, MOUNTPOINT))
     signal.signal(signal.SIGINT, lambda *_signal: _stop_server(server, MOUNTPOINT))
     print(f"{args.mode} workload listening on {args.host}:{args.port}", flush=True)

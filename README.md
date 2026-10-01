@@ -120,5 +120,5 @@ One 256 MiB trial completed on Rancher Desktop containerd. Origin startup was ex
 | Client | Start to ready | 
 | --- |---------------:| 
 | Baseline |       1,764 ms | 
-| Python FUSE |       1,238 ms | 
+| Python FUSE |       1,038 ms | 
 
