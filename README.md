@@ -144,14 +144,6 @@ The record stores readiness/first-read/warm-read timings and origin request/byte
 
 ## Setup and run
 
-### Requirements
-
-- Rancher Desktop running with **containerd** and its `nerdctl` CLI available.
-- Python 3.10+ on Windows for the existing HTTP backend; the standalone FUSE benchmark uses Python's standard library on the host and Python 3.12 inside its Linux images.
-- Network access to Docker Hub for the initial `python:3.12-slim` pull/build. If BuildKit cannot resolve `registry-1.docker.io`, restore Rancher's network/DNS path and retry.
-- For the Python FUSE target, `/dev/fuse` must be available inside Rancher's Linux environment. The demo grants mount capability to a local PoC container; this is not a production security profile.
-
-Set `NERDCTL_BIN` if `nerdctl` is not on `PATH`. Keep unrelated container/image data intact; both benchmark scripts remove only their own client/origin containers and trial image tags. The local PoC registry remains running and retains pushed test content until explicitly removed.
 
 ### Run Python FUSE benchmark
 
@@ -169,49 +161,16 @@ py -3 poc\filesystem\benchmark.py --trials 3 --payload-mib 256 --chunk-kib 1024 
 
 Defaults: one trial, 256 MiB payload, 1 MiB chunks, 16 MiB in-memory cache. Allowed trial count is 1–5 and payload size 16–1024 MiB. Results go to `poc/data/filesystem-benchmarks.json`.
 
-### Run containerd eStargz benchmark
-
-The local runtime should report both `overlayfs` and `stargz` in `nerdctl info`. The repository hook is installed on Windows at `%LOCALAPPDATA%\rancher-desktop\provisioning\stargz-snapshotter.start`; restarting Rancher Desktop lets it provision the Stargz daemon and register the proxy snapshotter. The hook extends Rancher's generated config rather than replacing it.
-
-Start the API:
-
-```powershell
-py -3 poc\server.py
-```
-
-In another PowerShell window, run one pair:
-
-```powershell
-Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8765/benchmarks `
-  -ContentType 'application/json' `
-  -Body '{"modes":["baseline","lazy"],"trials":1}'
-```
-
-The API listens only on loopback port 8765. Results are written to `poc/data/benchmarks.json`. This benchmark converts an ordinary image to eStargz, pushes both image forms to the local registry, then runs `overlayfs` and `stargz` snapshotter modes.
 
 ## Verified Python FUSE benchmark
 
 Most recent saved completed trial (ID `0c06847fade9`, 2 October 2026, 256 MiB payload):
 
-| Client mode | Snapshotter | Start to ready | First 1 MiB read | Repeat read | Origin bytes on first/repeat read |
-| --- | --- | ---: | ---: | ---: | ---: |
-| Baseline | `overlayfs` | 1,723 ms | 28 ms | 31 ms | 0 / 0 |
-| Python FUSE | `overlayfs` | 1,280 ms | 40 ms | 19 ms | 1 MiB / 0 |
+| Client mode | Snapshotter | Start to ready | First 1 MiB read | Repeat read | 
+| --- | --- | ---: | ---: | ---: | 
+| Baseline | `overlayfs` | 1,723 ms | 28 ms | 31 ms | 
+| Python FUSE | `overlayfs` | 1,280 ms | 40 ms | 19 ms |
 
 In this single trial, the measured FUSE **client** reached ready about 443 ms sooner, while its first read was about 12 ms slower. FUSE fetched no range bytes before readiness, then one 1 MiB range for the first read and zero for the repeated read. The edge reads fetched another 2 MiB in total. Image build/push preparation took about 71.8 seconds, and origin image pull/start were excluded from the client timings.
 
-These numbers are a working demonstration, not a production speedup claim. The payload origin is already available and its image includes the full payload. If total cold-start time must include origin provisioning, measure that cost too. FUSE also adds work to reads, and results vary by cache state and host/network conditions. Run several trials before drawing a performance conclusion.
 
-## What production image lazy pulling would still require
-
-This Python filesystem is a raw-file demonstrator. Turning it into a production image filesystem would require an OCI-aware containerd snapshotter (or equivalent runtime integration), manifest/config/layer handling, mapping container paths through layered filesystems and whiteouts, seekable compressed layer indexes, decompression, digest verification, registry authentication, robust retries/concurrency/prefetch, persistent shared caches, daemon recovery, security isolation, and production observability. The existing Stargz Snapshotter is the project’s real OCI/eStargz integration demonstration; the Python FUSE work illustrates the lower-level demand-read/cache mechanism.
-
-## Storage and cleanup
-
-Trial image layers remain in the local registry after the benchmark, while the local temporary image tags and trial containers are removed. The registry container is named `ese-coldstart-poc-registry` and publishes port 5000. Remove just that PoC registry (and its retained test data) when you no longer need it:
-
-```powershell
-nerdctl rm --force ese-coldstart-poc-registry
-```
-
-This does not remove unrelated containers. Do not edit Rancher's containerd directories or its `ext4.vhdx` directly; use `nerdctl` for container/image operations.
