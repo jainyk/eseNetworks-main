@@ -119,10 +119,6 @@ The record stores readiness/first-read/warm-read timings and origin request/byte
 | `poc/filesystem/fusefs.py` | Defines `RangeFileSystem` callbacks, range validation, fixed-size chunk loading, and bounded LRU behavior. |
 | `poc/filesystem/workload.py` | Starts either local-payload baseline or FUSE mount, exposes `/healthz` and `/read`, and attempts FUSE unmount on shutdown. |
 | `poc/filesystem/benchmark.py` | Builds/pushes images, orchestrates `nerdctl`, times requests, verifies byte equality/EOF, and saves the independent result record. |
-| `poc/server.py` | Separate existing HTTP API for the original overlayfs-versus-Stargz eStargz benchmark. |
-| `poc/workload/Dockerfile` and `poc/workload/server.py` | Existing image and HTTP workload used by the original OCI image benchmark. |
-| `poc/rancher/stargz.start` | Rancher Desktop provisioning hook that installs and registers Stargz Snapshotter for the original eStargz mode. |
-| `code-flow.md`, `poc/filesystem.md` | Additional detailed walkthroughs for the original and FUSE PoCs. This README summarizes both and is the main entry point. |
 
 ## Setup and run
 
