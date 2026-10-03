@@ -13,15 +13,6 @@ The Python FUSE experiment can make the *client workload container* start sooner
 
 ```mermaid
 flowchart LR
-    subgraph Original[Containerd eStargz benchmark]
-        A[nerdctl run --pull=always] --> B[containerd pulls image from local registry]
-        B --> C{snapshotter}
-        C -->|overlayfs| D[ordinary image layers available before app runs]
-        C -->|stargz| E[Stargz Snapshotter mounts eStargz layers lazily]
-        D --> F[workload ready]
-        E --> F
-        F --> G[read payload]
-    end
 
     subgraph PythonFUSE[Standalone Python FUSE experiment]
         O[range-origin container already running] -->|HTTP HEAD: file metadata| M[FUSE client mounts virtual file]
