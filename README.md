@@ -1,47 +1,185 @@
-# Container cold-start PoC
+# Container Cold-Start and Lazy-Filesystem PoC
 
-This PoC compares startup and first-request latency for the same Python service image using Rancher Desktop's containerd runtime:
+This repository contains two related but distinct experiments for understanding container startup and lazy data access on Rancher Desktop:
 
-- `baseline`: ordinary OCI image with containerd's `overlayfs` snapshotter.
-- `lazy`: eStargz image with Stargz Snapshotter, fetched on demand.
+1. **Containerd eStargz benchmark:** compares an ordinary image pulled with the `overlayfs` snapshotter against an eStargz-converted image pulled with Stargz Snapshotter. This exercises actual container image layer lazy pulling.
+2. **Standalone Python FUSE demonstrator:** exposes one raw payload file through FUSE and fetches HTTP byte ranges on demand. This isolates the filesystem, chunking, and cache ideas. It is not a containerd snapshotter and does not lazily pull OCI layers.
 
-The sample image contains a 256 MiB deterministic payload in a separate image layer. Its HTTP server becomes ready without opening the payload; `/read` reads a requested prefix so the first request exercises lazy file fetching.
+The Python FUSE experiment can make the *client workload container* start sooner by keeping its large payload out of that client's image. The payload origin is a separate service and, in this benchmark, it is already pulled and running before client timing starts. So the result demonstrates a design strategy; it does not prove that total system startup is faster when the origin must also be started.
 
-## Prerequisites
+## Two different image/data paths
 
-- Rancher Desktop running with the **containerd** engine (the `nerdctl` CLI works).
-- Python 3.10 or newer on Windows. The backend uses only the Python standard library.
-- The Stargz Snapshotter plugin installed and registered with Rancher Desktop's containerd before selecting `lazy` mode. The repository includes `poc/rancher/stargz.start`, a Rancher Desktop Windows provisioning hook for installing Stargz Snapshotter v0.18.2 and registering it with containerd.
+`nerdctl run --pull=always` asks Rancher's containerd to pull the selected **client image** from the local registry before starting that container. The FUSE code does not perform this image pull. After the FUSE client starts, a workload file read may cause the Python FUSE daemon to make an HTTP `Range` request for **payload bytes** from the separate origin container.
 
-Keep the container engine set to containerd; Kubernetes can remain enabled or disabled. To install Stargz, copy `poc/rancher/stargz.start` to `%LOCALAPPDATA%\\rancher-desktop\\provisioning\\stargz-snapshotter.start`, then restart Rancher Desktop. This provisioning hook preserves and extends Rancher's generated containerd configuration. The installed runtime should report both `overlayfs` and `stargz` in `nerdctl info`.
+```mermaid
+flowchart LR
+    subgraph Original[Containerd eStargz benchmark]
+        A[nerdctl run --pull=always] --> B[containerd pulls image from local registry]
+        B --> C{snapshotter}
+        C -->|overlayfs| D[ordinary image layers available before app runs]
+        C -->|stargz| E[Stargz Snapshotter mounts eStargz layers lazily]
+        D --> F[workload ready]
+        E --> F
+        F --> G[read payload]
+    end
 
-## Components and what each one does
+    subgraph PythonFUSE[Standalone Python FUSE experiment]
+        O[range-origin container already running] -->|HTTP HEAD: file metadata| M[FUSE client mounts virtual file]
+        H[nerdctl run --pull=always] --> I[containerd pulls small FUSE client image]
+        I --> M
+        M --> J[workload reports ready]
+        J --> K[workload open/read on virtual file]
+        K --> L[Linux VFS sends read through /dev/fuse]
+        L --> N[Python fusepy read callback]
+        N --> P{chunk in LRU cache?}
+        P -->|yes| Q[return cached bytes]
+        P -->|no| R[HTTP Range GET for missing chunk]
+        R --> O
+        O --> S[return requested range]
+        S --> N
+        N --> T[return file bytes to workload]
+        Q --> T
+    end
+```
 
-| Component | Role in this PoC |
+## Why the Python FUSE design is structured this way
+
+### Keep the data source simple and the file readable
+
+The source is one raw file served with standard HTTP byte ranges, rather than a compressed OCI layer. This keeps the demonstrator focused on the core FUSE path: file offset → chunk number → remote byte range → returned file bytes. Parsing OCI manifests, tar layers, whiteouts, eStargz tables of contents, compressed chunks, and digest metadata would be a much larger project. The separate eStargz benchmark already exercises the real container-image path.
+
+### Separate payload from the measured client image
+
+The Dockerfile creates the same seeded payload for both clients. The baseline image includes the 256 MiB payload layer; the FUSE client image includes the workload and FUSE code but not that payload. A separate origin image holds the payload and range server.
+
+That gives a controlled demonstration of deferring the workload's payload dependency: the FUSE client has less payload data in the image it needs to pull before it can report ready. The benchmark starts the origin before measuring clients, so its image pull/start is excluded. In a real deployment, the origin would need to be already available or its startup/data cost would need to be included.
+
+### Use one file, read-only semantics, and offset-based callbacks
+
+The filesystem exposes only `/` and `/payload.bin`. It implements the operations needed by this workload—metadata, directory listing, open, and read—and rejects writes. Restricting the PoC to one immutable file avoids implementing general-purpose filesystem behavior such as mutation, ownership updates, symlinks, hard links, and a writable overlay.
+
+The FUSE `read` callback receives a path, requested byte count, and offset. It computes the first and last chunk touched by the read, so non-zero and unaligned reads can be mapped to the right source ranges. A request crossing a chunk boundary may need multiple chunks; a read at or beyond EOF returns no bytes.
+
+### Fixed-size chunks and bounded LRU cache
+
+The default chunk size is **1 MiB** and the in-memory LRU limit is **16 MiB**. A miss requests a whole aligned chunk; later reads of bytes from that chunk can use memory rather than call the origin again. A bounded cache prevents memory usage from growing with the size of the whole file. `--chunk-kib` and `--cache-mib` make these tradeoffs adjustable.
+
+The FUSE handle uses direct I/O in this PoC so kernel page caching does not hide repeat reads from the Python cache. This makes the LRU behavior easier to observe. It is a measurement choice: production implementations should benchmark whether kernel page cache, direct I/O, or a combination is best for the workload.
+
+### Validate the remote response before serving data
+
+The daemon gets size metadata with `HEAD` and requires byte-range support. Each cache miss sends one `Range` request and accepts data only when the origin returns HTTP `206`, the `Content-Range` bounds and total match the requested chunk and known file size, and the body length is exact. Network errors, malformed range responses, or short bodies become a filesystem I/O error instead of silently returning incorrect data.
+
+### Measure source traffic independently from image pulling
+
+The origin counts successful range requests and payload bytes. Its `HEAD` response and health/stats endpoints do not count as payload range bytes. The benchmark captures origin counters before readiness, around the first read, around the repeated read, and around offset/EOF reads.
+
+These counters describe payload traffic between the FUSE client and the local origin. They do **not** count the client image bytes pulled by containerd. The client image is still an ordinary OCI image and uses `overlayfs` in both FUSE and baseline modes.
+
+## Detailed FUSE code flow
+
+### 1. Build the three targets from one payload seed
+
+`poc/filesystem/Dockerfile` has these targets:
+
+| Target | Contents | Use |
+| --- | --- | --- |
+| `payload` | Generates `/payload.bin` using `PAYLOAD_MIB` and `PAYLOAD_SEED`. | Shared build stage, not directly run. |
+| `origin` | Python HTTP range server plus the generated payload. | Serves bytes before client timing starts. |
+| `baseline` | Workload plus `/app/payload.bin`. | Ordinary payload-in-image comparison. |
+| `fuse` | Workload, `fusepy`, and Linux FUSE utilities; no payload layer. | Mounts and reads the remote virtual file. |
+
+All three targets use the same payload build stage, size, and seed within a trial. The baseline and FUSE workloads therefore read matching content.
+
+### 2. Start and inspect the origin
+
+`benchmark.py` verifies Rancher's `nerdctl` connection and ensures the existing local registry is running. It builds and pushes unique origin/baseline/FUSE tags, then removes only those local trial tags. It starts the origin with `--pull=always`, publishes its health/stats endpoint on a free loopback port, waits for `/healthz`, and obtains the origin container's bridge IP.
+
+This origin image contains the full payload. Its pull and startup occur **before** the measured baseline/FUSE client runs. The FUSE client receives `FUSE_SOURCE_URL=http://<origin-container-ip>:8081/payload.bin`.
+
+### 3. Start workload container and wait for readiness
+
+For each client, the benchmark starts a timer immediately before `nerdctl run --detach --pull=always`. It publishes the workload's port and waits for `GET /healthz` to return `ready`.
+
+- The **baseline** uses `--snapshotter overlayfs`; its app serves `/app/payload.bin` from its image layer.
+- The **FUSE client** also uses `--snapshotter overlayfs`, but additionally receives `/dev/fuse`, `CAP_SYS_ADMIN`, and `apparmor=unconfined` so it can mount FUSE inside the Linux container. Its app image has no payload layer.
+
+The FUSE client's Python process starts `mount_filesystem()` in a thread. `RangeFileSystem` sends `HEAD` to learn the source file length, then serves metadata through `getattr`. It does not fetch payload bytes during this mount step. `workload.py` waits until `/mnt/lazy` is a mountpoint and only then starts its HTTP server. Thus FUSE setup time is included in client start-to-ready time.
+
+### 4. Translate a normal read into HTTP range requests
+
+The benchmark calls `GET /read?bytes=1048576&offset=0`. The app opens `/mnt/lazy/payload.bin`, seeks to the offset, and reads the requested bytes like a normal file.
+
+The kernel routes this read through FUSE to `RangeFileSystem.read()`:
+
+1. Clamp the request to file length so the callback does not read beyond EOF.
+2. Compute the chunk index and offset inside that chunk.
+3. Check the ordered in-memory cache while holding its lock.
+4. On a miss, request the aligned byte interval from `origin.py`.
+5. Validate HTTP status, `Content-Range`, and exact response length.
+6. Insert the chunk into the LRU, evict least-recently-used chunks if the configured byte limit is exceeded, and return only the requested slice.
+
+The first and repeated 1 MiB reads must return identical data. With the default settings, the first read fetched one 1 MiB origin range in the verified run, and the repeated read fetched none. The repeat was served by the Python LRU because the file is opened with `direct_io=True`.
+
+### 5. Exercise offsets, EOF, collect metrics, and clean up
+
+The benchmark also reads 512 bytes across a chunk boundary, reads near EOF (where only 64 bytes remain), and reads from exact EOF (which returns an empty body). It compares the SHA-256 digest of the same offset read in baseline and FUSE modes.
+
+The record stores readiness/first-read/warm-read timings and origin request/byte deltas for before-ready, first read, warm read, and edge reads. `run_client()` stops/removes each client in a `finally` block. `run_trial()` stops/removes its origin and removes only the trial image tags. The named local registry and its pushed trial content remain. Results are stored separately in `poc/data/filesystem-benchmarks.json` so they do not mix with `poc/data/benchmarks.json` from the original eStargz benchmark.
+
+## File and component reference
+
+| File/component | Function |
 | --- | --- |
-| Windows Python backend (`poc/server.py`) | Exposes a small HTTP API, orchestrates `nerdctl`, times readiness and file-read requests, and saves JSON benchmark records. It uses only Python's standard library. |
-| Workload (`poc/workload/server.py`) | A small HTTP server inside the test image. `/healthz` signals readiness. `/read?bytes=N` opens and reads the payload file only when requested. |
-| Workload Dockerfile | Builds the Python service image and writes a deterministic, trial-specific large payload into its own image layer. |
-| Rancher Desktop | Supplies the local Linux VM/WSL environment and containerd daemon. The PoC targets Rancher's **containerd** engine through its `nerdctl` CLI. |
-| containerd | Pulls/resolves the image, asks a snapshotter to prepare the container root filesystem, and runs the container. |
-| `overlayfs` snapshotter | The baseline snapshotter. It creates the container's writable filesystem view from locally available image layers using Linux OverlayFS. The normal image pull makes layer contents available before the workload can use them. |
-| eStargz | An image-layer format compatible with OCI registries that adds a table of contents and independently addressable compressed regions/chunks. This lets a runtime fetch needed file data without downloading and unpacking the entire layer first. |
-| Stargz Snapshotter (`containerd-stargz-grpc`) | A containerd proxy snapshotter. It serves the `stargz` snapshotter API over a Unix socket and presents eStargz layers as remote/lazy filesystem snapshots. It fetches metadata and file chunks from the registry as they are needed. |
-| FUSE | Linux's Filesystem in Userspace interface. Stargz Snapshotter uses a FUSE mount to expose the remote image filesystem to the container. A workload's normal `open`/`read` is serviced by the mounted filesystem; missing file data can cause Stargz to fetch the required eStargz chunk(s), then make the data available to that read. FUSE is the kernel/userspace filesystem bridge; it is not the image format, registry, or snapshotter itself. |
-| Local Docker Registry | Holds the two trial image references at `localhost:5000`, so both benchmark modes use a registry pull path rather than simply starting from the build-local name. It remains running and retains pushed test manifests/layers after a run. |
-| `nerdctl` | Containerd-compatible CLI used by the backend to build, tag, convert, push, run, and clean up the PoC's containers/images. |
+| `poc/filesystem/Dockerfile` | Defines shared payload and the three origin/baseline/FUSE image targets. Installs `fuse`, `libfuse2`, and pinned `fusepy` only in the FUSE target. |
+| `poc/filesystem/requirements.txt` | Pins `fusepy==3.0.1`. |
+| `poc/filesystem/origin.py` | Serves payload metadata and byte ranges, exposes health and thread-safe transfer counters, and resets stats between modes. |
+| `poc/filesystem/fusefs.py` | Defines `RangeFileSystem` callbacks, range validation, fixed-size chunk loading, and bounded LRU behavior. |
+| `poc/filesystem/workload.py` | Starts either local-payload baseline or FUSE mount, exposes `/healthz` and `/read`, and attempts FUSE unmount on shutdown. |
+| `poc/filesystem/benchmark.py` | Builds/pushes images, orchestrates `nerdctl`, times requests, verifies byte equality/EOF, and saves the independent result record. |
+| `poc/server.py` | Separate existing HTTP API for the original overlayfs-versus-Stargz eStargz benchmark. |
+| `poc/workload/Dockerfile` and `poc/workload/server.py` | Existing image and HTTP workload used by the original OCI image benchmark. |
+| `poc/rancher/stargz.start` | Rancher Desktop provisioning hook that installs and registers Stargz Snapshotter for the original eStargz mode. |
+| `code-flow.md`, `poc/filesystem.md` | Additional detailed walkthroughs for the original and FUSE PoCs. This README summarizes both and is the main entry point. |
 
-## Run
+## Setup and run
 
-From the repository root in Command Prompt or PowerShell:
+### Requirements
+
+- Rancher Desktop running with **containerd** and its `nerdctl` CLI available.
+- Python 3.10+ on Windows for the existing HTTP backend; the standalone FUSE benchmark uses Python's standard library on the host and Python 3.12 inside its Linux images.
+- Network access to Docker Hub for the initial `python:3.12-slim` pull/build. If BuildKit cannot resolve `registry-1.docker.io`, restore Rancher's network/DNS path and retry.
+- For the Python FUSE target, `/dev/fuse` must be available inside Rancher's Linux environment. The demo grants mount capability to a local PoC container; this is not a production security profile.
+
+Set `NERDCTL_BIN` if `nerdctl` is not on `PATH`. Keep unrelated container/image data intact; both benchmark scripts remove only their own client/origin containers and trial image tags. The local PoC registry remains running and retains pushed test content until explicitly removed.
+
+### Run Python FUSE benchmark
+
+From the repository root in PowerShell:
+
+```powershell
+py -3 poc\filesystem\benchmark.py
+```
+
+Optional tuning:
+
+```powershell
+py -3 poc\filesystem\benchmark.py --trials 3 --payload-mib 256 --chunk-kib 1024 --cache-mib 16
+```
+
+Defaults: one trial, 256 MiB payload, 1 MiB chunks, 16 MiB in-memory cache. Allowed trial count is 1–5 and payload size 16–1024 MiB. Results go to `poc/data/filesystem-benchmarks.json`.
+
+### Run containerd eStargz benchmark
+
+The local runtime should report both `overlayfs` and `stargz` in `nerdctl info`. The repository hook is installed on Windows at `%LOCALAPPDATA%\rancher-desktop\provisioning\stargz-snapshotter.start`; restarting Rancher Desktop lets it provision the Stargz daemon and register the proxy snapshotter. The hook extends Rancher's generated config rather than replacing it.
+
+Start the API:
 
 ```powershell
 py -3 poc\server.py
 ```
 
-The API listens only on `127.0.0.1:8765`.
-
-Run one baseline and one lazy trial:
+In another PowerShell window, run one pair:
 
 ```powershell
 Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8765/benchmarks `
@@ -49,76 +187,31 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8765/benchmarks `
   -Body '{"modes":["baseline","lazy"],"trials":1}'
 ```
 
-Read saved benchmark results:
+The API listens only on loopback port 8765. Results are written to `poc/data/benchmarks.json`. This benchmark converts an ordinary image to eStargz, pushes both image forms to the local registry, then runs `overlayfs` and `stargz` snapshotter modes.
+
+## Verified Python FUSE benchmark
+
+Most recent saved completed trial (ID `0c06847fade9`, 2 October 2026, 256 MiB payload):
+
+| Client mode | Snapshotter | Start to ready | First 1 MiB read | Repeat read | Origin bytes on first/repeat read |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Baseline | `overlayfs` | 1,723 ms | 28 ms | 31 ms | 0 / 0 |
+| Python FUSE | `overlayfs` | 1,280 ms | 40 ms | 19 ms | 1 MiB / 0 |
+
+In this single trial, the measured FUSE **client** reached ready about 443 ms sooner, while its first read was about 12 ms slower. FUSE fetched no range bytes before readiness, then one 1 MiB range for the first read and zero for the repeated read. The edge reads fetched another 2 MiB in total. Image build/push preparation took about 71.8 seconds, and origin image pull/start were excluded from the client timings.
+
+These numbers are a working demonstration, not a production speedup claim. The payload origin is already available and its image includes the full payload. If total cold-start time must include origin provisioning, measure that cost too. FUSE also adds work to reads, and results vary by cache state and host/network conditions. Run several trials before drawing a performance conclusion.
+
+## What production image lazy pulling would still require
+
+This Python filesystem is a raw-file demonstrator. Turning it into a production image filesystem would require an OCI-aware containerd snapshotter (or equivalent runtime integration), manifest/config/layer handling, mapping container paths through layered filesystems and whiteouts, seekable compressed layer indexes, decompression, digest verification, registry authentication, robust retries/concurrency/prefetch, persistent shared caches, daemon recovery, security isolation, and production observability. The existing Stargz Snapshotter is the project’s real OCI/eStargz integration demonstration; the Python FUSE work illustrates the lower-level demand-read/cache mechanism.
+
+## Storage and cleanup
+
+Trial image layers remain in the local registry after the benchmark, while the local temporary image tags and trial containers are removed. The registry container is named `ese-coldstart-poc-registry` and publishes port 5000. Remove just that PoC registry (and its retained test data) when you no longer need it:
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:8765/benchmarks
+nerdctl rm --force ese-coldstart-poc-registry
 ```
 
-Set `NERDCTL_BIN` if `nerdctl` is not on `PATH`. Set `POC_PAYLOAD_MIB` to change the generated image payload size (default `256`).
-
-## What is measured
-
-Each trial builds one payload image and an eStargz-converted variant, publishes them to a local registry, then measures container start to `/healthz`.
-
-## Recorded benchmark result
-
-One baseline/lazy pair was run on Rancher Desktop containerd v2.3.2 with a 256 MiB payload. 
-
-
-| Mode | Snapshotter | Start to ready | 
-| --- | --- |---------------:| 
-| Baseline | `overlayfs` |       3,334 ms | 
-| Lazy | `stargz` |       1,665 ms | 
-
-
-## API
-
-- `GET /healthz`: backend and nerdctl availability.
-- `POST /benchmarks`: start one or more baseline/lazy trials. JSON fields: `modes` (array containing `baseline` and/or `lazy`).
-- `GET /benchmarks`: list persisted benchmark records.
-- `GET /benchmarks/{id}`: fetch one record.
-
-## Scope
-
-This demonstrates eStargz lazy pulling and records local startup/read latency. 
-
-## Python FUSE demonstrator
-
-A separate read-only Python FUSE experiment serves a virtual payload file through HTTP range requests and reports source bytes fetched. It compares a payload-in-image baseline with a small FUSE client image; the source container is started before client timing. 
-
-## Approach
-
-The demo makes a large payload available as a single read-only virtual file, `/mnt/lazy/payload.bin`:
-
-1. The origin container serves a generated payload through HTTP `HEAD` and `GET` with a single byte `Range` request. It counts range requests and payload bytes returned.
-2. The FUSE process asks the origin for the file length, so it can report file metadata without downloading the file contents.
-3. When the application opens and reads the virtual file, the kernel sends FUSE read operations to the Python daemon. The daemon maps each offset to fixed-size chunks and fetches only the missing chunks from the origin.
-4. The daemon keeps a bounded least-recently-used in-memory chunk cache. For this demonstration, direct I/O bypasses the kernel page cache so the repeat request exercises the Python cache and should need no additional origin bytes.
-5. The application exposes `/healthz` only after the FUSE mount is usable, plus `/read?bytes=N&offset=O` to exercise normal file access.
-
-FUSE is the Linux kernel/userspace bridge for filesystem operations; the Python daemon supplies the file metadata and data. The cache chunk size is 1 MiB and its limit is 16 MiB by default. Both can be changed at runtime by the benchmark CLI. The demo opens the FUSE file with direct I/O so the kernel page cache does not hide repeated reads from the Python LRU cache; this makes the PoC's cache behavior visible, but is a measurement choice rather than a production tuning recommendation.
-
-
-## Modules
-
-| File | Responsibility |
-| --- | --- |
-| `poc/filesystem/Dockerfile` | Defines three build targets from shared generated data: `origin` (large payload plus range server), `baseline` (workload with payload in the image), and `fuse` (workload plus Python FUSE code, without the payload). |
-| `poc/filesystem/origin.py` | Serves `HEAD /payload.bin`, exact `GET /payload.bin` byte ranges, `/healthz`, `/stats`, and `POST /stats/reset`. Rejects invalid/out-of-bounds ranges with HTTP 416. |
-| `poc/filesystem/fusefs.py` | Implements the read-only FUSE root and `/payload.bin` callbacks. Validates range status, `Content-Range`, and response size before caching bytes. |
-| `poc/filesystem/workload.py` | In `baseline` mode serves `/app/payload.bin`; in `fuse` mode mounts the virtual file first, then serves from `/mnt/lazy/payload.bin`. Provides health and range-of-file reads. |
-| `poc/filesystem/benchmark.py` | Builds and pushes trial images, starts the origin before timing, runs baseline and FUSE clients, verifies content/edge reads, records source range byte counts, and writes JSON results. |
-| `poc/filesystem/requirements.txt` | Pins `fusepy` for repeatable FUSE client image builds. |
-| `poc/data/filesystem-benchmarks.json` | Stores the standalone FUSE benchmark records (created on first run). |
-
-
-### Verified Rancher run
-
-One 256 MiB trial completed on Rancher Desktop containerd. Origin startup was excluded as described above.
-
-| Client | Start to ready | 
-| --- |---------------:| 
-| Baseline |       1,764 ms | 
-| Python FUSE |       1,038 ms | 
-
+This does not remove unrelated containers. Do not edit Rancher's containerd directories or its `ext4.vhdx` directly; use `nerdctl` for container/image operations.
