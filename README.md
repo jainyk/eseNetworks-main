@@ -1,12 +1,10 @@
 # Container Cold-Start and Lazy-Filesystem PoC
 
-This repository contains two related but distinct experiments for understanding container startup and lazy data access on Rancher Desktop:
+This repository contains experiment for understanding container startup and lazy data access on Rancher Desktop:
 
-1. **Containerd eStargz benchmark:** compares an ordinary image pulled with the `overlayfs` snapshotter against an eStargz-converted image pulled with Stargz Snapshotter. This exercises actual container image layer lazy pulling.
-2. **Standalone Python FUSE demonstrator:** exposes one raw payload file through FUSE and fetches HTTP byte ranges on demand. This isolates the filesystem, chunking, and cache ideas. It is not a containerd snapshotter and does not lazily pull OCI layers.
+1. **Standalone Python FUSE demonstrator:** exposes one raw payload file through FUSE and fetches HTTP byte ranges on demand. This isolates the filesystem, chunking, and cache ideas. It is not a containerd snapshotter and does not lazily pull OCI layers.
 
-The Python FUSE experiment can make the *client workload container* start sooner by keeping its large payload out of that client's image. The payload origin is a separate service and, in this benchmark, it is already pulled and running before client timing starts. So the result demonstrates a design strategy; it does not prove that total system startup is faster when the origin must also be started.
-
+The Python FUSE experiment can make the *client workload container* start sooner by keeping its large payload out of that client's image. The payload origin is a separate service and, in this benchmark, it is already pulled and running before client timing starts. 
 ## Two different image/data paths
 
 `nerdctl run --pull=always` asks Rancher's containerd to pull the selected **client image** from the local registry before starting that container. The FUSE code does not perform this image pull. After the FUSE client starts, a workload file read may cause the Python FUSE daemon to make an HTTP `Range` request for **payload bytes** from the separate origin container.
@@ -37,25 +35,19 @@ flowchart LR
 
 ### Keep the data source simple and the file readable
 
-The source is one raw file served with standard HTTP byte ranges, rather than a compressed OCI layer. This keeps the demonstrator focused on the core FUSE path: file offset → chunk number → remote byte range → returned file bytes. Parsing OCI manifests, tar layers, whiteouts, eStargz tables of contents, compressed chunks, and digest metadata would be a much larger project. The separate eStargz benchmark already exercises the real container-image path.
-
+The source is one raw file served with standard HTTP byte ranges, rather than a compressed OCI layer, since the aim focuses on the core FUSE path: file offset → chunk number → remote byte range → returned file bytes. 
 ### Separate payload from the measured client image
 
 The Dockerfile creates the same seeded payload for both clients. The baseline image includes the 256 MiB payload layer; the FUSE client image includes the workload and FUSE code but not that payload. A separate origin image holds the payload and range server.
 
-That gives a controlled demonstration of deferring the workload's payload dependency: the FUSE client has less payload data in the image it needs to pull before it can report ready. The benchmark starts the origin before measuring clients, so its image pull/start is excluded. In a real deployment, the origin would need to be already available or its startup/data cost would need to be included.
-
+That gives a controlled demonstration of deferring the workload's payload dependency: the FUSE client has less payload data in the image it needs to pull before it can report ready. 
 ### Use one file, read-only semantics, and offset-based callbacks
 
-The filesystem exposes only `/` and `/payload.bin`. It implements the operations needed by this workload—metadata, directory listing, open, and read—and rejects writes. Restricting the PoC to one immutable file avoids implementing general-purpose filesystem behavior such as mutation, ownership updates, symlinks, hard links, and a writable overlay.
-
-The FUSE `read` callback receives a path, requested byte count, and offset. It computes the first and last chunk touched by the read, so non-zero and unaligned reads can be mapped to the right source ranges. A request crossing a chunk boundary may need multiple chunks; a read at or beyond EOF returns no bytes.
-
+The filesystem exposes only `/` and `/payload.bin`. It implements the operations needed by this workload—metadata, directory listing, open, and read—and rejects writes. 
+The FUSE `read` callback receives a path, requested byte count, and offset. It computes the first and last chunk touched by the read, so non-zero and unaligned reads can be mapped to the right source ranges. 
 ### Fixed-size chunks and bounded LRU cache
 
 The default chunk size is **1 MiB** and the in-memory LRU limit is **16 MiB**. A miss requests a whole aligned chunk; later reads of bytes from that chunk can use memory rather than call the origin again. A bounded cache prevents memory usage from growing with the size of the whole file. `--chunk-kib` and `--cache-mib` make these tradeoffs adjustable.
-
-The FUSE handle uses direct I/O in this PoC so kernel page caching does not hide repeat reads from the Python cache. This makes the LRU behavior easier to observe. It is a measurement choice: production implementations should benchmark whether kernel page cache, direct I/O, or a combination is best for the workload.
 
 ### Validate the remote response before serving data
 
@@ -65,7 +57,6 @@ The daemon gets size metadata with `HEAD` and requires byte-range support. Each 
 
 The origin counts successful range requests and payload bytes. Its `HEAD` response and health/stats endpoints do not count as payload range bytes. The benchmark captures origin counters before readiness, around the first read, around the repeated read, and around offset/EOF reads.
 
-These counters describe payload traffic between the FUSE client and the local origin. They do **not** count the client image bytes pulled by containerd. The client image is still an ordinary OCI image and uses `overlayfs` in both FUSE and baseline modes.
 
 ## Detailed FUSE code flow
 
