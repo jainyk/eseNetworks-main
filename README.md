@@ -142,13 +142,15 @@ Defaults: one trial, 256 MiB payload, 1 MiB chunks, 16 MiB in-memory cache. Allo
 
 ## Verified Python FUSE benchmark
 
-Most recent saved completed trial (ID `0c06847fade9`, 2 October 2026, 256 MiB payload):
-
-| Client mode | Snapshotter | Start to ready | First 1 MiB read | Repeat read | 
-| --- | --- | ---: | ---: | ---: | 
-| Baseline | `overlayfs` | 1,723 ms | 28 ms | 31 ms | 
-| Python FUSE | `overlayfs` | 1,280 ms | 40 ms | 19 ms |
-
-In this single trial, the measured FUSE **client** reached ready about 443 ms sooner, while its first read was about 12 ms slower. FUSE fetched no range bytes before readiness, then one 1 MiB range for the first read and zero for the repeated read. The edge reads fetched another 2 MiB in total. Image build/push preparation took about 71.8 seconds, and origin image pull/start were excluded from the client timings.
+| Client mode | Snapshotter | Start to ready | 
+| --- | --- | ---: |  
+| Baseline | `overlayfs` | 1,723 ms |  
+| Python FUSE | `overlayfs` | 1,280 ms | 
 
 
+| Client mode | Snapshotter | First 1 MiB read | Repeat read |
+| --- | --- | ---: | ---: |  
+| Python FUSE | `overlayfs` | 40 ms | 19 ms | 
+
+
+In this single trial, the measured FUSE **client** reached ready about 443 ms sooner. 
