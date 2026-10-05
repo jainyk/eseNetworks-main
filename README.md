@@ -4,10 +4,9 @@ This is the youtube link [![Watch the video](https://youtube.com)](https://youtu
 
 This repository contains experiment for understanding container startup and lazy data access on Rancher Desktop:
 
-1. **Standalone Python FUSE demonstrator:** exposes one raw payload file through FUSE and fetches HTTP byte ranges on demand. This isolates the filesystem, chunking, and cache ideas. It is not a containerd snapshotter and does not lazily pull OCI layers.
-
-The Python FUSE experiment can make the *client workload container* start sooner by keeping its large payload out of that client's image. The payload origin is a separate service and, in this benchmark, it is already pulled and running before client timing starts. 
-## Two different image/data paths
+1. **Standalone Python FUSE demonstrator:** exposes one raw payload file through FUSE and fetches HTTP byte ranges on demand. This isolates the filesystem, chunking, and cache ideas. 
+The Python FUSE experiment can make the *client workload container* start sooner by keeping its large payload out of that client's image. The payload origin is a separate service. 
+## Image/Data paths
 
 `nerdctl run --pull=always` asks Rancher's containerd to pull the selected **client image** from the local registry before starting that container. The FUSE code does not perform this image pull. After the FUSE client starts, a workload file read may cause the Python FUSE daemon to make an HTTP `Range` request for **payload bytes** from the separate origin container.
 
@@ -37,7 +36,7 @@ flowchart LR
 
 ### Keep the data source simple and the file readable
 
-The source is one raw file served with standard HTTP byte ranges, rather than a compressed OCI layer, since the aim focuses on the core FUSE path: file offset → chunk number → remote byte range → returned file bytes. 
+The source is one raw file served with standard HTTP byte ranges, since the aim focuses on the core FUSE path: file offset → chunk number → remote byte range → returned file bytes. 
 ### Separate payload from the measured client image
 
 The Dockerfile creates the same seeded payload for both clients. The baseline image includes the 256 MiB payload layer; the FUSE client image includes the workload and FUSE code but not that payload. A separate origin image holds the payload and range server.
@@ -107,9 +106,9 @@ The first and repeated 1 MiB reads must return identical data. With the default 
 
 ### 5. Exercise offsets, EOF, collect metrics, and clean up
 
-The benchmark also reads 512 bytes across a chunk boundary, reads near EOF (where only 64 bytes remain), and reads from exact EOF (which returns an empty body). It compares the SHA-256 digest of the same offset read in baseline and FUSE modes.
+The benchmark also reads 512 bytes across a chunk boundary, reads near EOF (where only 64 bytes remain), and reads from exact EOF (which returns an empty body). It compares the same offset read in baseline and FUSE modes.
 
-The record stores readiness/first-read/warm-read timings and origin request/byte deltas for before-ready, first read, warm read, and edge reads. `run_client()` stops/removes each client in a `finally` block. `run_trial()` stops/removes its origin and removes only the trial image tags. The named local registry and its pushed trial content remain. Results are stored separately in `poc/data/filesystem-benchmarks.json` so they do not mix with `poc/data/benchmarks.json` from the original eStargz benchmark.
+The record stores readiness/first-read/warm-read timings and origin request/byte deltas for before-ready, first read, warm read, and edge reads. `run_client()` stops/removes each client in a `finally` block. `run_trial()` stops/removes its origin and removes only the trial image tags. The named local registry and its pushed trial content remain. 
 
 ## File and component reference
 
