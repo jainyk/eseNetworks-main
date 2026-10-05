@@ -1,4 +1,4 @@
-# Container Cold-Start and Lazy-Filesystem PoC
+# FUSE-Filesystem and Container Cold Start PoC
 
 This is the youtube link [![Watch the video](https://youtube.com)](https://youtu.be/MELAWqHCRAE) which gives a short walkthrough of the project highlighting the main aspects of the demo.
 
